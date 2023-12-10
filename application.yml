@@ -1,0 +1,27 @@
+spring:
+   application: 
+     name: edi-processor-svc
+   mvc.pathmatch.matching-strategy: ANT_PATH_MATCHER
+
+logging:
+  file.name: logs/${spring.application.name}.log
+  level:
+    root: INFO
+    org.springframework.web: ERROR
+    net.assentindia: DEBUG
+    org.hibernate: ERROR
+
+server:
+    ##servlet.context-path: /
+    port: 9085
+    
+sftp:
+    frequency: 5000
+    host: localhost
+    port: 22
+    username: tester
+    password: password
+    remoteDirectory: /
+    localDirectory: sftp-inbound
+    backupDirectory: sftp-inbound-backup
+    fileExtenstion: txt

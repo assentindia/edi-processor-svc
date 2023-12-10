@@ -1,0 +1,470 @@
+/*
+ * Copyright 2005-2019 by BerryWorks Software, LLC. All rights reserved.
+ *
+ * This file is part of EDIReader. You may obtain a license for its use directly from
+ * BerryWorks Software, and you may also choose to use this software under the terms of the
+ * GPL version 3. Other products in the EDIReader software suite are available only by licensing
+ * with BerryWorks. Only those files bearing the GPL statement below are available under the GPL.
+ *
+ * EDIReader is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * EDIReader is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+ * even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with EDIReader.  If not,
+ * see <http://www.gnu.org/licenses/>.
+ */
+
+package net.assentindia.edi.processor.reader;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+
+import net.assentindia.edi.processor.reader.exception.EDISyntaxException;
+import net.assentindia.edi.processor.reader.exception.EDISyntaxExceptionHandler;
+import net.assentindia.edi.processor.reader.exception.GroupControlNumberException;
+import net.assentindia.edi.processor.reader.exception.GroupCountException;
+import net.assentindia.edi.processor.reader.exception.InterchangeControlNumberException;
+import net.assentindia.edi.processor.reader.exception.RecoverableSyntaxException;
+import net.assentindia.edi.processor.reader.exception.SegmentCountException;
+import net.assentindia.edi.processor.reader.exception.TransactionControlNumberException;
+import net.assentindia.edi.processor.reader.exception.TransactionCountException;
+import net.assentindia.edi.processor.reader.plugin.PluginController;
+import net.assentindia.edi.processor.reader.plugin.PluginControllerFactory;
+import net.assentindia.edi.processor.reader.plugin.PluginControllerFactoryInterface;
+
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.util.List;
+
+import static net.assentindia.edi.processor.reader.FixedLength.isPresent;
+
+/**
+ * Common parent class to several EDIReader subclasses that provide for the
+ * parsing of specific EDI standards. This common parent provides an opportunity
+ * to factor and share common concepts and logic.
+ */
+public abstract class StandardReader extends EDIReader {
+    private static final Logger logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass().getSimpleName());
+
+    /**
+     * Interchange Control Number
+     */
+    private String interchangeControlNumber;
+
+    /**
+     * Group-level control number
+     */
+    private String groupControlNumber;
+
+    private int groupCount;
+    private int documentCount;
+    private ReplyGenerator ackGenerator;
+    private ReplyGenerator alternateAckGenerator;
+    private RecoverableSyntaxException syntaxException;
+    private PluginControllerFactoryInterface pluginControllerFactory;
+    protected PluginController segmentPluginController;
+
+    protected abstract Token recognizeBeginning() throws IOException, SAXException;
+
+    protected abstract Token parseInterchange(Token t) throws SAXException,
+            IOException;
+
+    @Override
+    public void parse(InputSource source) throws SAXException, IOException {
+        if (source == null)
+            throw new IOException("parse called with null InputSource");
+        if (getContentHandler() == null)
+            throw new IOException("parse called with null ContentHandler");
+
+        if (!isExternalXmlDocumentStart())
+            startXMLDocument();
+
+        parseSetup(source);
+
+        getTokenizer().setDelimiter(getDelimiter());
+        getTokenizer().setSubDelimiter(getSubDelimiter());
+        getTokenizer().setRelease(getRelease());
+        getTokenizer().setRepetitionSeparator(getRepetitionSeparator());
+        getTokenizer().setTerminator(getTerminator());
+
+        try {
+            parseInterchange(recognizeBeginning());
+        } catch (EDISyntaxException e) {
+            if (ackGenerator != null)
+                ackGenerator.generateNegativeACK();
+            if (alternateAckGenerator != null)
+                alternateAckGenerator.generateNegativeACK();
+            throw e;
+        }
+
+        if (!isExternalXmlDocumentStart())
+            endXMLDocument();
+
+    }
+
+    /**
+     * Issue SAX calls on behalf of an EDI element. The token passed as an
+     * argument is first token of a field.
+     *
+     * @param t the parsed token
+     * @throws SAXException for problem emitting SAX events
+     */
+    protected void parseSegmentElement(Token t) throws SAXException {
+        EDIAttributes attributes;
+
+        String elementId = t.getElementId();
+        switch (t.getType()) {
+
+            case SIMPLE:
+
+                // Take a quick exit for empty fields, a very common case
+                if (t.getValueLength() == 0 || (!t.containsNonSpace() && !isKeepSpacesOnlyElements()))
+                    return;
+
+                attributes = getDocumentAttributes();
+                attributes.clear();
+                attributes.addCDATA(getXMLTags().getIdAttribute(), elementId);
+                startElement(getXMLTags().getElementTag(), attributes);
+                getContentHandler().characters(t.getValueChars(), 0, t.getValueLength());
+                endElement(getXMLTags().getElementTag());
+                if (segmentPluginController != null)
+                    segmentPluginController.noteElement(getContentHandler(), elementId, t.getValueChars(), 0, t.getValueLength());
+                break;
+
+            case SUB_ELEMENT:
+
+                attributes = getDocumentAttributes();
+
+                if (t.isFirst()) {
+                    attributes.clear();
+                    attributes.addCDATA(getXMLTags().getIdAttribute(), elementId);
+                    attributes.addCDATA(getXMLTags().getCompositeIndicator(), "yes");
+                    startElement(getXMLTags().getElementTag(), attributes);
+                }
+
+                attributes.clear();
+                attributes.addAttribute(
+                        "",
+                        getXMLTags().getSubElementSequence(),
+                        getXMLTags().getSubElementSequence(),
+                        "CDATA", String.valueOf(1 + t.getSubIndex()));
+                startElement(getXMLTags().getSubElementTag(), attributes);
+                getContentHandler().characters(t.getValueChars(), 0, t.getValueLength());
+                endElement(getXMLTags().getSubElementTag());
+
+                if (t.isLast()) {
+                    endElement(getXMLTags().getElementTag());
+                }
+                break;
+
+            case SUB_EMPTY:
+
+                if (t.isFirst()) {
+                    attributes = getDocumentAttributes();
+                    attributes.clear();
+                    attributes.addCDATA(getXMLTags().getIdAttribute(), elementId);
+                    attributes.addCDATA(getXMLTags().getCompositeIndicator(), "yes");
+                    startElement(getXMLTags().getElementTag(), attributes);
+                }
+                if (t.isLast()) {
+                    endElement(getXMLTags().getElementTag());
+                }
+                break;
+        }
+    }
+
+    /**
+     * Set an override value to be used whenever generating a control date and
+     * time. This method is used for automated testing.
+     *
+     * @param overrideValue to be used in lieu of current date and time
+     */
+
+    public void setControlDateAndTime(String overrideValue) {
+        ReplyGenerator generator = getAckGenerator();
+        if (generator != null) {
+            generator.setControlDateAndTime(overrideValue);
+        }
+
+        generator = getAlternateAckGenerator();
+        if (generator != null) {
+            generator.setControlDateAndTime(overrideValue);
+        }
+    }
+
+    protected boolean recover(RecoverableSyntaxException e) {
+        boolean result = false;
+        EDISyntaxExceptionHandler handler = getSyntaxExceptionHandler();
+        if (handler == null) {
+            logger.warn(e.getMessage());
+        } else {
+            // We'll let the handler do any logging it wants to do.
+            result = handler.process(e);
+        }
+        return result;
+    }
+
+    public int getGroupCount() {
+        return groupCount;
+    }
+
+    public void setGroupCount(int groupCount) {
+        this.groupCount = groupCount;
+    }
+
+    public String getInterchangeControlNumber() {
+        return interchangeControlNumber;
+    }
+
+    public void setInterchangeControlNumber(String interchangeControlNumber) {
+        this.interchangeControlNumber = interchangeControlNumber;
+    }
+
+    public String getGroupControlNumber() {
+        return groupControlNumber;
+    }
+
+    public void setGroupControlNumber(String groupControlNumber) {
+        this.groupControlNumber = groupControlNumber;
+    }
+
+    public int getDocumentCount() {
+        return documentCount;
+    }
+
+    public void setDocumentCount(int documentCount) {
+        this.documentCount = documentCount;
+    }
+
+    public RecoverableSyntaxException getSyntaxException() {
+        return syntaxException;
+    }
+
+    public void setSyntaxException(RecoverableSyntaxException syntaxException) {
+        this.syntaxException = syntaxException;
+    }
+
+    protected String parseStringFromNextElement() throws IOException, EDISyntaxException {
+        List<String> v = getTokenizer().nextCompositeElement();
+        if (isPresent(v)) {
+            String obj = v.get(0);
+            if (obj != null)
+                return obj;
+        }
+        EDISyntaxException se = new EDISyntaxException(ErrorMessages.MANDATORY_ELEMENT_MISSING, getTokenizer());
+        logger.warn(se.getMessage());
+        throw se;
+    }
+
+    protected void checkGroupCount(int groupCount, int n, String errorMessage) throws GroupCountException {
+        if (groupCount != n) {
+            GroupCountException se = new GroupCountException(errorMessage, groupCount, n, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    protected void checkTransactionCount(int segCount, int n, String errorMessage) throws TransactionCountException {
+        if (segCount != n) {
+            TransactionCountException se = new TransactionCountException(errorMessage, segCount, n, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    protected void checkSegmentCount(int segCount, int n, String errorMessage) throws SegmentCountException {
+        if (segCount != n) {
+            SegmentCountException se = new SegmentCountException(errorMessage, segCount, n, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    protected void checkInterchangeControlNumber(String expected, String actual, String errorMessage) throws InterchangeControlNumberException {
+        if (actual == null) {
+            actual = "(omitted)";
+        }
+        if (!actual.equals(expected)) {
+            InterchangeControlNumberException se = new InterchangeControlNumberException(errorMessage, expected, actual, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    protected void checkGroupControlNumber(String control, String s, String errorMessage) throws GroupControlNumberException {
+        if (!s.equals(control)) {
+            GroupControlNumberException se = new GroupControlNumberException(errorMessage, control, s, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    protected void checkTransactionControlNumber(String expected, String actual, String errorMessage) throws TransactionControlNumberException {
+        if (actual == null) {
+            actual = "(omitted)";
+        }
+        if (!actual.equals(expected)) {
+            TransactionControlNumberException se = new TransactionControlNumberException(errorMessage, expected, actual, getTokenizer());
+            setSyntaxException(se);
+            if (!recover(se))
+                throw se;
+        }
+    }
+
+    public ReplyGenerator getAckGenerator() {
+        return ackGenerator;
+    }
+
+    public void setAckGenerator(ReplyGenerator generator) {
+        this.ackGenerator = generator;
+    }
+
+    public ReplyGenerator getAlternateAckGenerator() {
+        return alternateAckGenerator;
+    }
+
+    public void setAlternateAckGenerator(ReplyGenerator generator) {
+        this.alternateAckGenerator = generator;
+    }
+
+    public PluginControllerFactoryInterface getPluginControllerFactory() {
+        // Lazy load
+        if (pluginControllerFactory == null) {
+            pluginControllerFactory = new PluginControllerFactory();
+        }
+        return pluginControllerFactory;
+    }
+
+    @Override
+    public void setPluginControllerFactory(PluginControllerFactoryInterface pluginControllerFactory) {
+        this.pluginControllerFactory = pluginControllerFactory;
+    }
+
+    protected void parseSegment(PluginController pluginController, String segmentType) throws SAXException, IOException {
+        segmentPluginController = pluginController;
+        if (pluginController.transition(segmentType)) {
+            // First close off any loops that were closed as the result of
+            // the transition
+            int toClose = pluginController.closedCount();
+
+            logger.debug("closing {} loops", toClose);
+            for (; toClose > 0; toClose--)
+                endElement(getXMLTags().getLoopTag());
+
+            String s = pluginController.getLoopEntered();
+            if (pluginController.isResumed()) {
+                // We are resuming some outer loop, so we do not
+                // start a new instance of the loop.
+            } else {
+                getDocumentAttributes().clear();
+                getDocumentAttributes().addCDATA(getXMLTags().getIdAttribute(), s);
+                startElement(getXMLTags().getLoopTag(), getDocumentAttributes());
+            }
+        }
+
+        getDocumentAttributes().clear();
+        getDocumentAttributes().addCDATA(getXMLTags().getIdAttribute(), segmentType);
+        startElement(getXMLTags().getSegTag(), getDocumentAttributes());
+        if (segmentPluginController != null)
+            segmentPluginController.noteBeginningOfSegment(getContentHandler(), segmentType);
+
+        Token t;
+        while ((t = getTokenizer().nextToken()).getType() != Token.TokenType.SEGMENT_END) {
+
+            switch (t.getType()) {
+                case SIMPLE:
+                case EMPTY:
+                case SUB_ELEMENT:
+                case SUB_EMPTY:
+                    break;
+
+                case END_OF_DATA:
+                    EDISyntaxException se = new EDISyntaxException(UNEXPECTED_EOF, getTokenizer());
+                    logger.warn(se.getMessage());
+                    throw se;
+
+                default:
+                    se = new EDISyntaxException(MALFORMED_EDI_SEGMENT, getTokenizer());
+                    logger.warn(se.getMessage());
+                    throw se;
+
+            }
+
+            parseSegmentElement(t);
+        }
+        if (segmentPluginController != null)
+            segmentPluginController.noteEndOfSegment(getContentHandler(), segmentType);
+        endElement(getXMLTags().getSegTag());
+    }
+
+    protected void startInterchange(EDIAttributes attributes)
+            throws SAXException {
+        startElement(getXMLTags().getInterchangeTag(), attributes);
+    }
+
+    protected void endInterchange() throws SAXException {
+        endElement(getXMLTags().getInterchangeTag());
+    }
+
+    protected void startMessage(EDIAttributes attributes) throws SAXException {
+        startElement(getXMLTags().getDocumentTag(), attributes);
+    }
+
+    protected String getSubElement(List<String> compositeList, int i) {
+        String result = "";
+        try {
+            result = compositeList.get(i);
+        } catch (IndexOutOfBoundsException e) {
+            // ignore
+        }
+        return result;
+    }
+
+    protected void generatedSenderAndReceiver(String fromId, String fromQual, String fromExtra, String toId, String toQual, String toExtra) throws SAXException {
+        getInterchangeAttributes().clear();
+        startElement(getXMLTags().getSenderTag(), getInterchangeAttributes());
+        getInterchangeAttributes().addCDATA(getXMLTags().getIdAttribute(), fromId);
+        getInterchangeAttributes().addCDATA(getXMLTags().getQualifierAttribute(),
+                fromQual);
+        if (isPresent(fromExtra)) {
+            getInterchangeAttributes().addCDATA("Extra", fromExtra);
+        }
+        startSenderAddress(getInterchangeAttributes());
+        endElement(getXMLTags().getAddressTag());
+        endElement(getXMLTags().getSenderTag());
+
+        getInterchangeAttributes().clear();
+        startElement(getXMLTags().getReceiverTag(), getInterchangeAttributes());
+        getInterchangeAttributes().addCDATA(getXMLTags().getIdAttribute(), toId);
+        getInterchangeAttributes().addCDATA(getXMLTags().getQualifierAttribute(),
+                toQual);
+        if (isPresent(toExtra)) {
+            getInterchangeAttributes().addCDATA(getXMLTags()
+                    .getAddressExtraAttribute(), toExtra);
+        }
+        startReceiverAddress(getInterchangeAttributes());
+        endElement(getXMLTags().getAddressTag());
+        endElement(getXMLTags().getReceiverTag());
+    }
+
+    protected void startSenderAddress(EDIAttributes attributes)
+            throws SAXException {
+        startElement(getXMLTags().getAddressTag(), attributes);
+    }
+
+    protected void startReceiverAddress(EDIAttributes attributes)
+            throws SAXException {
+        startElement(getXMLTags().getAddressTag(), attributes);
+    }
+}
