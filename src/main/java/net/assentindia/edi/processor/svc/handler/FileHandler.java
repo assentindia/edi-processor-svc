@@ -46,26 +46,26 @@ public class FileHandler
 			stream = new FileInputStream(file);
 			EDIReader ediReader = EDIReaderFactory.createEDIReader(new InputSource(stream));
 			ByteArrayOutputStream baos = new ByteArrayOutputStream();
-			//SAXSource source = new SAXSource(ediReader,new InputSource(stream));
+			SAXSource source = new SAXSource(ediReader,new InputSource(stream));
 			
-			//Transformer transformer = TransformerFactory.newInstance().newTransformer();
+			Transformer transformer = TransformerFactory.newInstance().newTransformer();
 			
-			//StreamResult result = new StreamResult(baos);
+			StreamResult result = new StreamResult(baos);
 			
-			//transformer.transform(source, result);
+			transformer.transform(source, result);
 			
 			logger.info("Generated XML {}", new String(baos.toByteArray()));
 			
 			JSONObject xmlJSONObj = XML.toJSONObject(new String(baos.toByteArray()));
 			
-			int docType=xmlJSONObj.getJSONObject("ediroot").getJSONObject("interchange").getJSONObject("group").getJSONObject("transaction").getInt("DocType");
+			//int docType=xmlJSONObj.getJSONObject("ediroot").getJSONObject("interchange").getJSONObject("group").getJSONObject("transaction").getInt("DocType");
 			
 			ObjectMapper objectMapper = new ObjectMapper();
 			
-			if(docType==837)
-			{
-				root =objectMapper.readValue(xmlJSONObj.toString(4), Root837.class);
-			}
+			//if(docType==837)
+			//{
+			//	root =objectMapper.readValue(xmlJSONObj.toString(4), Root837.class);
+			//}
 			//else if(docType==835)
 			//{
 			//	root =objectMapper.readValue(xmlJSONObj.toString(4), Root835.class);

@@ -65,6 +65,7 @@ public class EDIReader extends EDIAbstractReader implements ErrorMessages {
     /**
      * Parse an EDI interchange from the input source.
      */
+    @Override
     public void parse(InputSource source) throws SAXException, IOException {
 
         startXMLDocument();
@@ -74,7 +75,7 @@ public class EDIReader extends EDIAbstractReader implements ErrorMessages {
             if (theReader == null) {
                 theReader = EDIReaderFactory.createEDIReader(source, leftOver);
                 if (theReader == null) {
-                    logger.debug("EDIReader.parse(InputSource) hit end of input");
+                    logger.info("EDIReader.parse(InputSource) hit end of input");
                     break;
                 }
                 logger.info("Created an EDIReader of type {}", theReader.getClass().getName());

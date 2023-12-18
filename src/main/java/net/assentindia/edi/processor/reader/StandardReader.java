@@ -75,6 +75,7 @@ public abstract class StandardReader extends EDIReader {
     protected abstract Token parseInterchange(Token t) throws SAXException,
             IOException;
 
+    //Override from XMLReader
     @Override
     public void parse(InputSource source) throws SAXException, IOException {
         if (source == null)
@@ -94,6 +95,7 @@ public abstract class StandardReader extends EDIReader {
         getTokenizer().setTerminator(getTerminator());
 
         try {
+        	//called from ANSIREADER
             parseInterchange(recognizeBeginning());
         } catch (EDISyntaxException e) {
             if (ackGenerator != null)
